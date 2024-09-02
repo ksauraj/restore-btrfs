@@ -23,52 +23,38 @@ class BtrfsListWorker(QThread):
 
     def run(self):
         try:
-            self.restore_files()
+            self.list_deleted_files()
         except Exception as e:
             self.progress.emit(f"Error: {str(e)}")
             self.finished.emit([])
 
-    def restore_files(self):
-        command = ['btrfs', 'restore', '-ivv', '--path-regex', self.path_regex, self.device, self.destination]
-        if self.use_sudo:
-            command = ['sudo'] + command
-        
-        self.progress.emit(f"Executing command: {' '.join(command)}")
-        self.execute_command(command)
-
-    def execute_command(self, command):
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-        recovered_files = []
-        for line in process.stdout:
-            self.progress.emit(line.strip())
-            if line.startswith("Restoring"):
-                parts = line.split()
-                if len(parts) >= 2:
-                    path = parts[1]
-                    recovered_files.append(path)
-        
-        process.wait()
-        self.finished.emit(recovered_files)
-
-    def advanced_restore(self):
+    def list_deleted_files(self):
+        # Find multiple roots
         roots = self.find_roots()
+        
+        if not roots:
+            self.progress.emit("Error: Could not find any valid roots.")
+            self.finished.emit([])
+            return
+
+        deleted_files = set()
         for root in roots:
-            command = ['btrfs', 'restore', '-t', root, '-Divv', '--path-regex', self.path_regex, self.device, self.destination]
+            command = ['btrfs', 'restore', '-t', root, '-Divv', '--path-regex', self.path_regex, self.device, '/dev/null']
             if self.use_sudo:
                 command = ['sudo'] + command
             
             self.progress.emit(f"Executing command: {' '.join(command)}")
-            self.execute_command(command)
+            deleted_files.update(self.execute_command(command))
+
+        self.finished.emit(list(deleted_files))
 
     def find_roots(self):
-        command = ['btrfs-find-root', self.device]
-        if self.depth == 2:
-            command.insert(1, '-a')
+        find_root_command = ['btrfs-find-root', self.device]
         if self.use_sudo:
-            command = ['sudo'] + command
+            find_root_command = ['sudo'] + find_root_command
         
-        self.progress.emit(f"Finding roots: {' '.join(command)}")
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        self.progress.emit(f"Finding roots: {' '.join(find_root_command)}")
+        process = subprocess.Popen(find_root_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         roots = []
         for line in process.stdout:
             if "Well block" in line:
@@ -79,17 +65,18 @@ class BtrfsListWorker(QThread):
 
     def execute_command(self, command):
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-        recovered_files = []
+        deleted_files = set()
         for line in process.stdout:
             self.progress.emit(line.strip())
             if line.startswith("Restoring"):
                 parts = line.split()
                 if len(parts) >= 2:
-                    path = parts[1]
-                    recovered_files.append(path)
+                    path = parts[1].replace('/dev/null/', '')
+                    deleted_files.add(path)
         
         process.wait()
-        self.finished.emit(recovered_files)
+        return deleted_files
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -114,15 +101,30 @@ class MainWindow(QMainWindow):
         partition_layout.addWidget(unmount_button)
         layout.addLayout(partition_layout)
 
+        # Add depth selection
+        depth_layout = QHBoxLayout()
+        depth_layout.addWidget(QLabel("Search Depth:"))
         self.depth_combo = QComboBox()
         self.depth_combo.addItems(["Basic", "Advanced", "Deep"])
-        layout.addWidget(QLabel("Search Depth:"))
-        layout.addWidget(self.depth_combo)
+        depth_layout.addWidget(self.depth_combo)
+        layout.addLayout(depth_layout)
+
+        # Add regex type selection
+        regex_type_layout = QHBoxLayout()
+        regex_type_layout.addWidget(QLabel("Recovery Type:"))
+        self.regex_type = QComboBox()
+        self.regex_type.addItems(["Specific File", "Specific Directory", "File Extension", "File in Directory", "Everything"])
+        self.regex_type.currentIndexChanged.connect(self.update_regex_hint)
+        regex_type_layout.addWidget(self.regex_type)
+        layout.addLayout(regex_type_layout)
 
         # Add regex input
+        regex_input_layout = QHBoxLayout()
+        regex_input_layout.addWidget(QLabel("Path/Filename:"))
         self.regex_input = QLineEdit()
-        layout.addWidget(QLabel("Path Regex:"))
-        layout.addWidget(self.regex_input)
+        self.regex_input.setPlaceholderText("Enter path or filename")
+        regex_input_layout.addWidget(self.regex_input)
+        layout.addLayout(regex_input_layout)
 
         # Device input
         device_layout = QHBoxLayout()
@@ -184,30 +186,6 @@ class MainWindow(QMainWindow):
         self.output_area = QTextEdit()
         self.output_area.setReadOnly(True)
         layout.addWidget(self.output_area)
-        # Add depth selection
-        depth_layout = QHBoxLayout()
-        depth_layout.addWidget(QLabel("Search Depth:"))
-        self.depth_combo = QComboBox()
-        self.depth_combo.addItems(["Basic", "Advanced", "Deep"])
-        depth_layout.addWidget(self.depth_combo)
-        layout.addLayout(depth_layout)
-
-        # Add regex type selection
-        regex_type_layout = QHBoxLayout()
-        regex_type_layout.addWidget(QLabel("Recovery Type:"))
-        self.regex_type = QComboBox()
-        self.regex_type.addItems(["Specific File", "Specific Directory", "File Extension", "File in Directory", "Everything"])
-        self.regex_type.currentIndexChanged.connect(self.update_regex_hint)
-        regex_type_layout.addWidget(self.regex_type)
-        layout.addLayout(regex_type_layout)
-
-        # Add regex input
-        regex_input_layout = QHBoxLayout()
-        regex_input_layout.addWidget(QLabel("Path/Filename:"))
-        self.regex_input = QLineEdit()
-        self.regex_input.setPlaceholderText("Enter path or filename")
-        regex_input_layout.addWidget(self.regex_input)
-        layout.addLayout(regex_input_layout)
 
         self.deleted_files = []
         self.refresh_partitions()
@@ -237,16 +215,10 @@ class MainWindow(QMainWindow):
         try:
             result = subprocess.run(['sudo', 'btrfs', 'filesystem', 'show'], capture_output=True, text=True)
             
-            print("Raw output:")
-            print(result.stdout)
-            print("Error output:")
-            print(result.stderr)
-            
             partitions = []
             current_uuid = None
             current_label = None
             for line in result.stdout.split('\n'):
-                print(f"Processing line: {line}")  # Debug print
                 if line.startswith('Label:'):
                     parts = line.split()
                     current_label = parts[1].strip("'")
@@ -257,15 +229,12 @@ class MainWindow(QMainWindow):
                     if current_uuid and device:
                         partition_info = f"{device} (UUID: {current_uuid}, Label: {current_label})"
                         partitions.append(partition_info)
-                        print(f"Added partition: {partition_info}")  # Debug print
                     current_uuid = None
                     current_label = None
             
-            print(f"Final partitions list: {partitions}")  # Debug print
             return partitions
         except Exception as e:
             self.output_area.append(f"Error listing BTRFS partitions: {str(e)}")
-            print(f"Exception in list_btrfs_partitions: {str(e)}")  # Debug print
             return []
 
     def refresh_partitions(self):
@@ -279,11 +248,12 @@ class MainWindow(QMainWindow):
             self.device_input.setText(first_partition)
         else:
             self.output_area.append("No BTRFS partitions found or an error occurred.")
-        print(f"Partitions added to combo box: {partitions}")  # Debug print
 
     def on_partition_selected(self, index):
         selected = self.partition_combo.currentText()
         if selected:
+            device = selected.split()[0]
+            self.device_input.setText(device)
             self.output_area.append(f"Selected partition: {selected}")
         else:
             self.output_area.append("No partition selected")
@@ -353,6 +323,9 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.update_file_list)
         self.worker.start()
 
+    def update_progress(self, message):
+        self.output_area.append(message)
+
     def update_file_list(self, files):
         self.deleted_files = files
         self.populate_table()
@@ -375,18 +348,18 @@ class MainWindow(QMainWindow):
 
     def sort_files(self, index):
         if index == 0:  # Name
-            self.deleted_files.sort(key=lambda x: x[0])
+            self.deleted_files.sort()
         elif index == 1:  # Size
-            self.deleted_files.sort(key=lambda x: int(x[1].split()[0]), reverse=True)
+            self.deleted_files.sort(key=lambda x: os.path.getsize(x) if os.path.exists(x) else 0, reverse=True)
         elif index == 2:  # Date
-            self.deleted_files.sort(key=lambda x: x[2], reverse=True)
-        self.populate_table()        
+            self.deleted_files.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=True)
+        self.populate_table()
 
     def start_restore(self):
-        device = self.partition_combo.currentText() or self.device_input.text()
-        destination = self.dest_input.text()
+        device = self.device_input.text()
+        destination = self.dest_input.text() or '/tmp/btrfs_recovery'
         selected_rows = set(index.row() for index in self.file_table.selectedIndexes())
-        selected_files = [self.deleted_files[row][0] for row in selected_rows]
+        selected_files = [self.deleted_files[row] for row in selected_rows]
 
         if not (device and destination and selected_files):
             self.output_area.append("Please fill in all fields and select files to restore.")
@@ -396,11 +369,39 @@ class MainWindow(QMainWindow):
         self.output_area.clear()
         self.output_area.append("Starting restoration process...")
 
-        # Implement the restoration process here
-        # You may want to create a new worker thread for this operation
+        # First, find the most recent root
+        find_root_command = ['sudo', 'btrfs-find-root', device]
+        self.output_area.append(f"Finding most recent root: {' '.join(find_root_command)}")
+        process = subprocess.Popen(find_root_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        root = None
+        for line in process.stdout:
+            if "Well block" in line:
+                root = re.search(r'Well block (\d+)', line)
+                if root:
+                    root = root.group(1)
+                    break
 
-    def update_progress(self, message):
-        self.output_area.append(message)
+        if not root:
+            self.output_area.append("Error: Could not find a valid root.")
+            self.restore_button.setEnabled(True)
+            return
+
+        # Ensure the destination directory exists
+        os.makedirs(destination, exist_ok=True)
+
+        for file in selected_files:
+            command = ['sudo', 'btrfs', 'restore', '-ivv', '-t', root, '--path-regex', f'/{re.escape(file)}$', device, destination]
+            
+            self.output_area.append(f"Executing command: {' '.join(command)}")
+            
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            for line in process.stdout:
+                self.output_area.append(line.strip())
+            
+            process.wait()
+
+        self.restore_button.setEnabled(True)
+        self.output_area.append("Restoration process completed.")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
