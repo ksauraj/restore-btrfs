@@ -11,7 +11,7 @@ import subprocess
 import re
 
 class BtrfsListWorker(QThread):
-    finished = pyqtSignal(list)
+    finished = pyqtSignal(list, dict)
     progress = pyqtSignal(str)
 
     def __init__(self, device, use_sudo, path_regex, destination='/tmp/btrfs_recovery'):
@@ -26,28 +26,30 @@ class BtrfsListWorker(QThread):
             self.list_deleted_files()
         except Exception as e:
             self.progress.emit(f"Error: {str(e)}")
-            self.finished.emit([])
+            self.finished.emit([], {})
 
     def list_deleted_files(self):
-        # Find multiple roots
         roots = self.find_roots()
         
         if not roots:
             self.progress.emit("Error: Could not find any valid roots.")
-            self.finished.emit([])
+            self.finished.emit([], {})
             return
 
         deleted_files = set()
+        successful_roots = {}
         for root in roots:
             command = ['btrfs', 'restore', '-t', root, '-Divv', '--path-regex', self.path_regex, self.device, '/dev/null']
             if self.use_sudo:
                 command = ['sudo'] + command
             
             self.progress.emit(f"Executing command: {' '.join(command)}")
-            deleted_files.update(self.execute_command(command))
+            files = self.execute_command(command)
+            if files:
+                deleted_files.update(files)
+                successful_roots[root] = files
 
-        self.finished.emit(list(deleted_files))
-
+        self.finished.emit(list(deleted_files), successful_roots)
     def find_roots(self):
         find_root_command = ['btrfs-find-root', self.device]
         if self.use_sudo:
@@ -86,6 +88,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout()
         main_widget.setLayout(layout)
+        self.successful_roots = {}
 
         # BTRFS partition selection
         partition_layout = QHBoxLayout()
@@ -326,8 +329,9 @@ class MainWindow(QMainWindow):
     def update_progress(self, message):
         self.output_area.append(message)
 
-    def update_file_list(self, files):
+    def update_file_list(self, files, successful_roots):
         self.deleted_files = files
+        self.successful_roots = successful_roots
         self.populate_table()
         self.list_button.setEnabled(True)
         self.restore_button.setEnabled(True)
@@ -369,27 +373,16 @@ class MainWindow(QMainWindow):
         self.output_area.clear()
         self.output_area.append("Starting restoration process...")
 
-        # First, find the most recent root
-        find_root_command = ['sudo', 'btrfs-find-root', device]
-        self.output_area.append(f"Finding most recent root: {' '.join(find_root_command)}")
-        process = subprocess.Popen(find_root_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-        root = None
-        for line in process.stdout:
-            if "Well block" in line:
-                root = re.search(r'Well block (\d+)', line)
-                if root:
-                    root = root.group(1)
-                    break
-
-        if not root:
-            self.output_area.append("Error: Could not find a valid root.")
-            self.restore_button.setEnabled(True)
-            return
-
         # Ensure the destination directory exists
         os.makedirs(destination, exist_ok=True)
 
         for file in selected_files:
+            # Find the correct root for this file
+            root = self.find_root_for_file(file)
+            if not root:
+                self.output_area.append(f"Error: Could not find a valid root for {file}")
+                continue
+
             command = ['sudo', 'btrfs', 'restore', '-ivv', '-t', root, '--path-regex', f'/{re.escape(file)}$', device, destination]
             
             self.output_area.append(f"Executing command: {' '.join(command)}")
@@ -402,6 +395,12 @@ class MainWindow(QMainWindow):
 
         self.restore_button.setEnabled(True)
         self.output_area.append("Restoration process completed.")
+
+    def find_root_for_file(self, file):
+        for root, files in self.successful_roots.items():
+            if file in files:
+                return root
+        return None
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
