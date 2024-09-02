@@ -14,35 +14,46 @@ class BtrfsListWorker(QThread):
     finished = pyqtSignal(list)
     progress = pyqtSignal(str)
 
-    def __init__(self, device, use_sudo, path_regex, depth=0):
+    def __init__(self, device, use_sudo, path_regex, destination='/tmp/btrfs_recovery'):
         super().__init__()
         self.device = device
         self.use_sudo = use_sudo
         self.path_regex = path_regex
-        self.depth = depth
+        self.destination = destination
 
     def run(self):
         try:
-            if self.depth == 0:
-                self.basic_restore()
-            elif self.depth in [1, 2]:
-                self.advanced_restore()
+            self.restore_files()
         except Exception as e:
             self.progress.emit(f"Error: {str(e)}")
             self.finished.emit([])
 
-    def basic_restore(self):
-        command = ['btrfs', 'restore', '-Divv', '--path-regex', self.path_regex, self.device, '/dev/null']
+    def restore_files(self):
+        command = ['btrfs', 'restore', '-ivv', '--path-regex', self.path_regex, self.device, self.destination]
         if self.use_sudo:
             command = ['sudo'] + command
         
         self.progress.emit(f"Executing command: {' '.join(command)}")
         self.execute_command(command)
 
+    def execute_command(self, command):
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        recovered_files = []
+        for line in process.stdout:
+            self.progress.emit(line.strip())
+            if line.startswith("Restoring"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    path = parts[1]
+                    recovered_files.append(path)
+        
+        process.wait()
+        self.finished.emit(recovered_files)
+
     def advanced_restore(self):
         roots = self.find_roots()
         for root in roots:
-            command = ['btrfs', 'restore', '-t', root, '-Divv', '--path-regex', self.path_regex, self.device, '/dev/null']
+            command = ['btrfs', 'restore', '-t', root, '-Divv', '--path-regex', self.path_regex, self.device, self.destination]
             if self.use_sudo:
                 command = ['sudo'] + command
             
@@ -68,19 +79,17 @@ class BtrfsListWorker(QThread):
 
     def execute_command(self, command):
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-        deleted_files = []
+        recovered_files = []
         for line in process.stdout:
             self.progress.emit(line.strip())
             if line.startswith("Restoring"):
                 parts = line.split()
-                if len(parts) >= 3:
+                if len(parts) >= 2:
                     path = parts[1]
-                    size = parts[2].strip('()')
-                    deleted_files.append((path, size, "Unknown"))
+                    recovered_files.append(path)
         
         process.wait()
-        self.finished.emit(deleted_files)
-
+        self.finished.emit(recovered_files)
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -299,6 +308,7 @@ class MainWindow(QMainWindow):
 
     def list_deleted_files(self):
         device = self.device_input.text()
+        destination = self.dest_input.text() or '/tmp/btrfs_recovery'
         if not device:
             self.output_area.append("Please select a BTRFS device or partition.")
             return
@@ -320,10 +330,8 @@ class MainWindow(QMainWindow):
 
         self.list_button.setEnabled(False)
         self.output_area.clear()
-        self.output_area.append("Listing deleted files...")
+        self.output_area.append("Starting file recovery...")
 
-        depth = self.depth_combo.currentIndex()
-        
         regex_type = self.regex_type.currentIndex()
         user_input = self.regex_input.text()
 
@@ -340,7 +348,7 @@ class MainWindow(QMainWindow):
 
         self.output_area.append(f"Using path regex: {path_regex}")
 
-        self.worker = BtrfsListWorker(device, self.sudo_checkbox.isChecked(), path_regex, depth)
+        self.worker = BtrfsListWorker(device, self.sudo_checkbox.isChecked(), path_regex, destination)
         self.worker.progress.connect(self.update_progress)
         self.worker.finished.connect(self.update_file_list)
         self.worker.start()
@@ -353,9 +361,16 @@ class MainWindow(QMainWindow):
 
     def populate_table(self):
         self.file_table.setRowCount(len(self.deleted_files))
-        for row, (path, size, date) in enumerate(self.deleted_files):
+        for row, path in enumerate(self.deleted_files):
             self.file_table.setItem(row, 0, QTableWidgetItem(path))
-            self.file_table.setItem(row, 1, QTableWidgetItem(size))
+            # Get file size and modification date if the file exists
+            if os.path.exists(path):
+                size = os.path.getsize(path)
+                date = datetime.fromtimestamp(os.path.getmtime(path)).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                size = "Unknown"
+                date = "Unknown"
+            self.file_table.setItem(row, 1, QTableWidgetItem(str(size)))
             self.file_table.setItem(row, 2, QTableWidgetItem(date))
 
     def sort_files(self, index):
