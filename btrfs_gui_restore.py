@@ -5,8 +5,10 @@ from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QLineEdit, QTextEdit, QFileDialog, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QComboBox, QCheckBox)
-import sys
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton, QScrollArea
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtGui import QPalette, QColor
+import sys
 import subprocess
 import re
 
@@ -79,15 +81,101 @@ class BtrfsListWorker(QThread):
         process.wait()
         return deleted_files
 
+
+class ColorScheme:
+    def __init__(self, dark_mode=False):
+        self.dark_mode = dark_mode
+        self.update_colors()
+
+    def update_colors(self):
+        if self.dark_mode:
+            self.background = QColor(18, 18, 18)
+            self.text = QColor(255, 255, 255)
+            self.accent = QColor(0, 176, 255)  # A vibrant blue
+            self.secondary_background = QColor(30, 30, 30)
+            self.border = QColor(60, 60, 60)
+        else:
+            self.background = QColor(245, 245, 245)
+            self.text = QColor(0, 0, 0)
+            self.accent = QColor(0, 120, 212)  # A softer blue for light mode
+            self.secondary_background = QColor(255, 255, 255)
+            self.border = QColor(200, 200, 200)
+
+    def apply_to_app(self, app):
+        palette = QPalette()
+        palette.setColor(QPalette.Window, self.background)
+        palette.setColor(QPalette.WindowText, self.text)
+        palette.setColor(QPalette.Base, self.secondary_background)
+        palette.setColor(QPalette.AlternateBase, self.background)
+        palette.setColor(QPalette.ToolTipBase, self.background)
+        palette.setColor(QPalette.ToolTipText, self.text)
+        palette.setColor(QPalette.Text, self.text)
+        palette.setColor(QPalette.Button, self.background)
+        palette.setColor(QPalette.ButtonText, self.text)
+        palette.setColor(QPalette.BrightText, Qt.red)
+        palette.setColor(QPalette.Link, self.accent)
+        palette.setColor(QPalette.Highlight, self.accent)
+        palette.setColor(QPalette.HighlightedText, self.background)
+        app.setPalette(palette)
+
+        # Set stylesheet for more detailed control
+        app.setStyleSheet(f"""
+            QMainWindow, QDialog {{ background-color: {self.background.name()}; }}
+            QPushButton {{ 
+                background-color: {self.accent.name()}; 
+                color: {self.background.name()}; 
+                border: none; 
+                padding: 8px 15px; 
+                border-radius: 4px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ 
+                background-color: {self.accent.lighter(110).name()}; 
+            }}
+            QPushButton:pressed {{ 
+                background-color: {self.accent.darker(110).name()}; 
+            }}
+            QLineEdit, QTextEdit, QComboBox {{ 
+                background-color: {self.secondary_background.name()}; 
+                border: 1px solid {self.border.name()}; 
+                padding: 5px; 
+                border-radius: 4px;
+                color: {self.text.name()};
+            }}
+            QTableWidget {{ 
+                background-color: {self.secondary_background.name()}; 
+                border: 1px solid {self.border.name()}; 
+                gridline-color: {self.border.name()};
+            }}
+            QHeaderView::section {{ 
+                background-color: {self.background.name()}; 
+                color: {self.text.name()}; 
+                padding: 5px;
+                border: 1px solid {self.border.name()};
+            }}
+            QLabel {{ color: {self.text.name()}; }}
+            QTextBrowser {{ 
+                background-color: {self.secondary_background.name()}; 
+                color: {self.text.name()};
+                border: 1px solid {self.border.name()};
+                padding: 5px;
+                border-radius: 4px;
+            }}
+        """)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BTRFS Restore GUI")
+        self.setWindowTitle("CatNode BTRFS Recovery Tool by - Ksauraj")
         self.setGeometry(100, 100, 800, 600)
+        self.color_scheme = ColorScheme(dark_mode=True)  # Default to dark mode
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         layout = QVBoxLayout()
         main_widget.setLayout(layout)
+        self.faq_button = QPushButton("FAQ")
+        self.faq_button.clicked.connect(self.show_faq)
+        layout.addWidget(self.faq_button)
         self.successful_roots = {}
 
         # BTRFS partition selection
@@ -192,6 +280,18 @@ class MainWindow(QMainWindow):
 
         self.deleted_files = []
         self.refresh_partitions()
+        self.mode_toggle = QPushButton("Switch to Light Mode")
+        self.mode_toggle.clicked.connect(self.toggle_mode)
+        layout.addWidget(self.mode_toggle)
+
+        self.deleted_files = []
+        self.refresh_partitions()
+
+    def toggle_mode(self):
+        self.color_scheme.dark_mode = not self.color_scheme.dark_mode
+        self.color_scheme.update_colors()
+        self.color_scheme.apply_to_app(QApplication.instance())
+        self.mode_toggle.setText("Switch to Light Mode" if self.color_scheme.dark_mode else "Switch to Dark Mode")
 
     def update_regex_hint(self, index):
         hints = [
@@ -401,9 +501,150 @@ class MainWindow(QMainWindow):
             if file in files:
                 return root
         return None
+    
+    def show_faq(self):
+        faq_dialog = FAQDialog(self)
+        faq_dialog.exec_()
+
+
+class FAQDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("CatNode BTRFS Recovery Tool - FAQs")
+        self.setGeometry(100, 100, 600, 400)
+
+        layout = QVBoxLayout()
+
+        scroll = QScrollArea()
+        content = QTextBrowser()
+        content.setOpenExternalLinks(True)
+        content.setHtml(self.get_faq_content())
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+
+        layout.addWidget(scroll)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.close)
+        layout.addWidget(close_button)
+
+        self.setLayout(layout)
+
+    def get_faq_content(self):
+        # This method will return the HTML content of the FAQs
+        return """
+        <h1>CatNode BTRFS Recovery Tool - FAQs and Related Information</h1>
+
+        <h2>General Questions</h2>
+
+        <h3>Q1: What is the CatNode BTRFS Recovery Tool?</h3>
+        <p>A: The CatNode BTRFS Recovery Tool is a graphical user interface application designed to facilitate the recovery of deleted files from BTRFS filesystems. It provides an easy-to-use interface for listing and restoring deleted files on BTRFS partitions.</p>
+
+        <h3>Q2: Who developed this tool?</h3>
+        <p>A: This tool was developed by Ksauraj.</p>
+
+        <h3>Q3: Is this tool free to use?</h3>
+        <p>A: Check License page for more information.</p>
+
+        <h2>Technical Questions</h2>
+
+        <h3>Q4: What are the system requirements for running this tool?</h3>
+        <p>A: The tool requires:
+        <ul>
+            <li>Python 3.6 or higher</li>
+            <li>PyQt5</li>
+            <li>BTRFS utilities (btrfs-progs)</li>
+            <li>A system with BTRFS filesystem support</li>
+        </ul></p>
+
+        <h3>Q5: On which operating systems can I run this tool?</h3>
+        <p>A: The tool is primarily designed for Linux systems with BTRFS support. It may work on macOS and Windows (via WSL) with limitations.</p>
+
+        <h3>Q6: How does the tool recover deleted files?</h3>
+        <p>A: The tool uses the BTRFS filesystem's ability to access previous states of the filesystem. It searches for and restores deleted files using the `btrfs restore` command with specific parameters.</p>
+
+        <h2>Usage Questions</h2>
+
+        <h3>Q7: How do I start the recovery process?</h3>
+        <p>A:
+        <ol>
+            <li>Run the application</li>
+            <li>Select the BTRFS partition</li>
+            <li>Choose search criteria (file type, directory, etc.)</li>
+            <li>Click "List Deleted Files"</li>
+            <li>Select files to recover</li>
+            <li>Specify a destination</li>
+            <li>Click "Restore Selected Files"</li>
+        </ol></p>
+
+        <h3>Q8: Why can't I see my BTRFS partition in the tool?</h3>
+        <p>A: Ensure that:
+        <ul>
+            <li>The partition is properly mounted</li>
+            <li>You have the necessary permissions to access the partition</li>
+            <li>The partition is indeed a BTRFS filesystem</li>
+        </ul></p>
+
+        <h3>Q9: The tool isn't recovering my files. What could be wrong?</h3>
+        <p>A: Several factors can affect file recovery:
+        <ul>
+            <li>Time elapsed since deletion</li>
+            <li>Filesystem activity after deletion</li>
+            <li>File fragmentation</li>
+            <li>Filesystem errors or corruption</li>
+        </ul></p>
+
+        <h3>Q10: Is it guaranteed that I'll recover all my deleted files?</h3>
+        <p>A: No, file recovery is not guaranteed. Success depends on various factors including how long ago the file was deleted and subsequent filesystem activity.</p>
+
+        <h2>BTRFS-Specific Questions</h2>
+
+        <h3>Q11: What is BTRFS?</h3>
+        <p>A: BTRFS (B-Tree File System) is a modern copy-on-write (CoW) filesystem for Linux aimed at implementing advanced features while focusing on fault tolerance, repair, and easy administration.</p>
+
+        <h3>Q12: How does BTRFS handle deleted files differently from other filesystems?</h3>
+        <p>A: BTRFS uses a copy-on-write mechanism, which can preserve older versions of files and metadata. This feature is what allows for the potential recovery of deleted files.</p>
+
+        <h3>Q13: What are BTRFS snapshots and how do they relate to file recovery?</h3>
+        <p>A: BTRFS snapshots are point-in-time copies of the filesystem. They can be very useful for recovering deleted files if a snapshot was taken before the deletion occurred.</p>
+
+        <h2>Troubleshooting</h2>
+
+        <h3>Q14: I'm getting a "parent transid verify failed" error. What does this mean?</h3>
+        <p>A: This error suggests that the filesystem's state has changed since the file was deleted. It may still be possible to recover the file, but with a higher risk of corruption or incomplete data.</p>
+
+        <h3>Q15: The tool says "Invalid mapping for [block range]". Can I still recover my file?</h3>
+        <p>A: This error indicates that the filesystem's metadata for the file has been altered. Recovery might be partial or impossible in this case.</p>
+
+        <h3>Q16: How can I increase my chances of successful file recovery?</h3>
+        <p>A:
+        <ul>
+            <li>Act quickly after realizing a file has been deleted</li>
+            <li>Minimize write operations to the filesystem after deletion</li>
+            <li>Regularly create and maintain BTRFS snapshots</li>
+            <li>Consider using BTRFS with multiple devices for redundancy</li>
+        </ul></p>
+
+        <h2>Best Practices</h2>
+
+        <h3>Q17: How can I prevent data loss in the future?</h3>
+        <p>A:
+        <ul>
+            <li>Regularly backup your important data</li>
+            <li>Use BTRFS features like snapshots</li>
+            <li>Be cautious when deleting files</li>
+            <li>Keep your filesystem healthy with regular maintenance</li>
+        </ul></p>
+
+        <h3>Q18: Are there any risks in using this recovery tool?</h3>
+        <p>A: While the tool is designed to be non-destructive, there's always a small risk when performing filesystem operations. It's recommended to work on a copy of the filesystem when possible.</p>
+
+        <p><em>Remember, while this tool aims to assist in file recovery, it's always best to maintain regular backups of important data to prevent loss.</em></p>
+        """
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.color_scheme.apply_to_app(app)
+    window.show()   
     sys.exit(app.exec_())
